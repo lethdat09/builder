@@ -173,9 +173,9 @@ jobs:
 
           sed -i "s|image:.*|image: quay.io/${IMAGE_NAME}:${IMAGE_TAG}|g" "$MANIFEST_PATH"
           kubectl --insecure-skip-tls-verify=true apply -f "$MANIFEST_PATH"
-          kubectl --insecure-skip-tls-verify=true rollout status -f "$MANIFEST_PATH" --timeout=180s
 
       - name: Notify Telegram on deploy result
+        # kubectl --insecure-skip-tls-verify=true rollout status -f "$MANIFEST_PATH" --timeout=180s
         if: success() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
