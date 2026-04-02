@@ -1,24 +1,33 @@
-# {
-#   "event_type": "trigger_build",
-#   "client_payload": {
-#     "name": "angi.user",
-#     "gitUrl": "",
-#     "branch": "main",
-#     "imageName": "angi/angi.user",
-#     "dockerfilePath": "Dockerfile",
-#     "kubeConfigYamlPath": "k8s.yaml"
-#   }
-# }
-
+# Sample repository_dispatch:
+# curl -X POST "https://api.github.com/repos/<owner>/<repo>/dispatches" \
+#   -H "Accept: application/vnd.github+json" \
+#   -H "Authorization: Bearer <github_token>" \
+#   -H "X-GitHub-Api-Version: 2022-11-28" \
+#   -d '{
+#     "event_type": "trigger_build",
+#     "client_payload": {
+#       "name": "angi.user",
+#       "gitUrl": "https://gitea.example.com/org/angi.user.git",
+#       "branch": "main",
+#       "imageName": "angi/angi.user",
+#       "dockerfilePath": "Dockerfile",
+#       "kubeConfigYamlPath": "k8s/deployment.yaml",
+#       "kubeConfig": "<base64_or_raw_kubeconfig>",
+#       "quay_username": "<quay_username>",
+#       "quay_token": "<quay_token>",
+#       "telegram_chat_id": "<telegram_chat_id>",
+#       "tele_token": "<telegram_bot_token>"
+#     }
+#   }'
 
 name: Build and Deploy Multi-Group Workflow
 
 on:
   repository_dispatch:
     types: [gitea-push, trigger_build]
-  
+
 concurrency:
-  group: ${{ github.event.client_payload.imageName }}   # Lấy group từ payload
+  group: ${{ github.event.client_payload.imageName }}
   cancel-in-progress: true
 
 jobs:
@@ -30,14 +39,15 @@ jobs:
       BRANCH: ${{ steps.set_env_vars.outputs.BRANCH }}
       IMAGE_NAME: ${{ steps.set_env_vars.outputs.IMAGE_NAME }}
       DOCKER_FILE_PATH: ${{ steps.set_env_vars.outputs.DOCKER_FILE_PATH }}
-      KUBECONFIG_YAML_PATH: ${{ steps.set_env_vars.outputs.KUBECONFIG_YAML_PATH }}
+      KUBECONFIG_CONTENT: ${{ steps.set_env_vars.outputs.KUBECONFIG_CONTENT }}
+      K8S_MANIFEST_PATH: ${{ steps.set_env_vars.outputs.K8S_MANIFEST_PATH }}
+      IMG_TAG_BASE: ${{ steps.set_env_vars.outputs.IMG_TAG_BASE }}
+      QUAY_USERNAME: ${{ steps.set_env_vars.outputs.QUAY_USERNAME }}
+      QUAY_TOKEN: ${{ steps.set_env_vars.outputs.QUAY_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ steps.set_env_vars.outputs.TELEGRAM_CHAT_ID }}
+      TELE_TOKEN: ${{ steps.set_env_vars.outputs.TELE_TOKEN }}
     steps:
-      - name: Notify Telegram on workflow start
-        run: |
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELE_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="🚀 Workflow ${{ github.workflow }} started for ${{ github.event.client_payload.imageName }}."
-      - name: Set up environment variables
+      - name: Set up environment variables from payload
         id: set_env_vars
         run: |
           echo "NAME=${{ github.event.client_payload.name }}" >> $GITHUB_OUTPUT
@@ -45,85 +55,132 @@ jobs:
           echo "BRANCH=${{ github.event.client_payload.branch }}" >> $GITHUB_OUTPUT
           echo "IMAGE_NAME=${{ github.event.client_payload.imageName }}" >> $GITHUB_OUTPUT
           echo "DOCKER_FILE_PATH=${{ github.event.client_payload.dockerfilePath }}" >> $GITHUB_OUTPUT
-          echo "KUBECONFIG_YAML_PATH=${{ github.event.client_payload.kubeConfigYamlPath }}" >> $GITHUB_OUTPUT
+          echo "KUBECONFIG_CONTENT=${{ github.event.client_payload.kubeConfig || github.event.client_payload.kubeConfigYaml || '' }}" >> $GITHUB_OUTPUT
+          echo "K8S_MANIFEST_PATH=${{ github.event.client_payload.kubeConfigYamlPath || github.event.client_payload.k8sManifestPath || '' }}" >> $GITHUB_OUTPUT
+          echo "IMG_TAG_BASE=${{ github.event.client_payload.imageTag || '' }}" >> $GITHUB_OUTPUT
+          echo "QUAY_USERNAME=${{ github.event.client_payload.quay_username || github.event.client_payload.quayUsername || '' }}" >> $GITHUB_OUTPUT
+          echo "QUAY_TOKEN=${{ github.event.client_payload.quay_token || github.event.client_payload.quayToken || '' }}" >> $GITHUB_OUTPUT
+          echo "TELEGRAM_CHAT_ID=${{ github.event.client_payload.telegram_chat_id || github.event.client_payload.telegramChatId || '' }}" >> $GITHUB_OUTPUT
+          echo "TELE_TOKEN=${{ github.event.client_payload.tele_token || github.event.client_payload.teleToken || '' }}" >> $GITHUB_OUTPUT
+
   build:
     runs-on: ubuntu-latest
     needs: prepare
     env:
-      GIT_URL: $(echo "${{ needs.prepare.outputs.GIT_URL }}" | base64 --decode)
+      GIT_URL: ${{ needs.prepare.outputs.GIT_URL }}
       BRANCH: ${{ needs.prepare.outputs.BRANCH }}
       IMAGE_NAME: ${{ needs.prepare.outputs.IMAGE_NAME }}
       DOCKER_FILE_PATH: ${{ needs.prepare.outputs.DOCKER_FILE_PATH }}
-      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
-      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELE_TOKEN: ${{ secrets.TELE_TOKEN }}
+      QUAY_USERNAME: ${{ needs.prepare.outputs.QUAY_USERNAME }}
+      QUAY_TOKEN: ${{ needs.prepare.outputs.QUAY_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ needs.prepare.outputs.TELEGRAM_CHAT_ID }}
+      TELE_TOKEN: ${{ needs.prepare.outputs.TELE_TOKEN }}
       NAME: ${{ needs.prepare.outputs.NAME }}
     outputs:
       IMG_TAG: ${{ steps.set_img_tag.outputs.IMG_TAG }}
     steps:
-      - name: Clone another repo
+      - name: Checkout target repository
+        id: checkout_repo
         run: |
-          echo "Cloning repository... ${{ env.GIT_URL }} on branch ${{ env.BRANCH }}"
-
-          git clone --depth=1 --branch ${{ env.BRANCH }} ${{ env.GIT_URL }} app
+          DECODED_GIT_URL=$(echo "${{ env.GIT_URL }}" | base64 --decode)
+          echo "Cloning repository... $DECODED_GIT_URL on branch ${{ env.BRANCH }}"
+          git clone --depth=1 --branch ${{ env.BRANCH }} "$DECODED_GIT_URL" app
           cd app
-          ls -la
           COMMIT_SHA=$(git rev-parse --short HEAD)
           echo "Commit SHA: $COMMIT_SHA"
-          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
+          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_OUTPUT
+
       - name: Build Docker image
         run: |
           cd app
-          docker login quay.io -u ${{ secrets.QUAY_USERNAME }} -p ${{ secrets.QUAY_TOKEN }}
-          docker build -t quay.io/${{ env.IMAGE_NAME }}:${{ env.COMMIT_SHA }}.${{ github.run_number }} .
+          echo "Building image quay.io/${{ env.IMAGE_NAME }}:${{ steps.checkout_repo.outputs.COMMIT_SHA }}.${{ github.run_number }}"
+          docker build -f ${{ env.DOCKER_FILE_PATH }} -t quay.io/${{ env.IMAGE_NAME }}:${{ steps.checkout_repo.outputs.COMMIT_SHA }}.${{ github.run_number }} .
+
       - name: Push Docker image
-        if: success()
         run: |
-          docker push quay.io/${{ env.IMAGE_NAME }}:${{ env.COMMIT_SHA }}.${{ github.run_number }}
-          echo "Docker image pushed successfully."
+          echo "Pushing image with registry credentials from payload"
+          echo "${{ env.QUAY_TOKEN }}" | docker login quay.io -u "${{ env.QUAY_USERNAME }}" --password-stdin
+          docker push quay.io/${{ env.IMAGE_NAME }}:${{ steps.checkout_repo.outputs.COMMIT_SHA }}.${{ github.run_number }}
+
       - name: Set image tag for deployment
         id: set_img_tag
-        run: echo "IMG_TAG=${{ env.COMMIT_SHA }}.${{ github.run_number }}" >> $GITHUB_OUTPUT
-      - name: Notify Telegram on success
-        if: success()
         run: |
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELE_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="✅ Build job ${{ env.NAME }} completed successfully! Tag: ${{ steps.set_img_tag.outputs.IMG_TAG }} uri: quay.io/${{ env.IMAGE_NAME }}:${{ steps.set_img_tag.outputs.IMG_TAG }} "
+          IMG_TAG=${{ steps.checkout_repo.outputs.COMMIT_SHA }}.${{ github.run_number }}
+          echo "IMG_TAG=$IMG_TAG" >> $GITHUB_OUTPUT
+
+      - name: Notify Telegram on success
+        if: success() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
+            -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
+            -d text="✅ Build complete: ${{ env.NAME }} image=quay.io/${{ env.IMAGE_NAME }}:${{ steps.set_img_tag.outputs.IMG_TAG }}"
 
       - name: Notify Telegram on failure
-        if: failure()
+        if: failure() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         run: |
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELE_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="❌ Build job ${{ env.NAME }}/${{ github.run_number }} failed! git url ${{ env.GIT_URL }} on branch ${{ env.BRANCH }}"
+          curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
+            -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
+            -d text="❌ Build failed: ${{ env.NAME }} for ${{ env.GIT_URL }} branch ${{ env.BRANCH }}"
+
   deploy:
     runs-on: ubuntu-latest
-    needs: 
+    needs:
       - prepare
       - build
     env:
-      KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      GIT_URL: ${{ needs.prepare.outputs.GIT_URL }}
+      BRANCH: ${{ needs.prepare.outputs.BRANCH }}
+      KUBECONFIG_CONTENT: ${{ needs.prepare.outputs.KUBECONFIG_CONTENT }}
+      K8S_MANIFEST_PATH: ${{ needs.prepare.outputs.K8S_MANIFEST_PATH }}
+      IMAGE_NAME: ${{ needs.prepare.outputs.IMAGE_NAME }}
       IMAGE_TAG: ${{ needs.build.outputs.IMG_TAG }}
-      KUBECONFIG_YAML_PATH: ${{ needs.prepare.outputs.KUBECONFIG_YAML_PATH }}
+      TELEGRAM_CHAT_ID: ${{ needs.prepare.outputs.TELEGRAM_CHAT_ID }}
+      TELE_TOKEN: ${{ needs.prepare.outputs.TELE_TOKEN }}
     steps:
-      - name: debug
+      - name: Checkout repo for manifest
         run: |
-          echo "IMAGE_TAG: $IMAGE_TAG"
-      # echo "KUBE_CONFIG_DATA: $KUBE_CONFIG_DATA"
-      # - name: Set up kubeconfig
-      #   run: |
-      #     mkdir -p $HOME/.kube
-      #     echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
-      #     cat $HOME/.kube/config
+          DECODED_GIT_URL=$(echo "${{ env.GIT_URL }}" | base64 --decode)
+          git clone --depth=1 --branch "${{ env.BRANCH }}" "$DECODED_GIT_URL" app
 
-      # - name: Deploy to K3s
-      #   run: |
-      #     echo "Deploying Docker image to K3s..."
-      #     kubectl set image deployment/angi-user angi-user=quay.io/angi/angi.user:${{ env.COMMIT_SHA }}.${{ github.run_number }} --kubeconfig ${{ secrets.K3S_KUBECONFIG }}
-      # - name: Send to server
-      #   run: |
-      #     curl -s -X POST http://your-server.com/upload \
-      #       -H "Content-Type: multipart/form-data" \
-      #       -F "file=@full-workflow.log"
+      - name: Set up kubeconfig from payload
+        if: env.KUBECONFIG_CONTENT != ''
+        run: |
+          mkdir -p $HOME/.kube
+          if echo "${{ env.KUBECONFIG_CONTENT }}" | base64 --decode >/dev/null 2>&1; then
+            echo "${{ env.KUBECONFIG_CONTENT }}" | base64 --decode > $HOME/.kube/config
+          else
+            echo "${{ env.KUBECONFIG_CONTENT }}" > $HOME/.kube/config
+          fi
+          chmod 600 $HOME/.kube/config
+
+      - name: Deploy to Kubernetes via manifest
+        run: |
+          set -e
+          if [ -z "${K8S_MANIFEST_PATH}" ]; then
+            echo "K8S_MANIFEST_PATH is required"
+            exit 1
+          fi
+
+          MANIFEST_PATH="app/${K8S_MANIFEST_PATH}"
+          if [ ! -f "$MANIFEST_PATH" ]; then
+            echo "Manifest file not found: $MANIFEST_PATH"
+            exit 1
+          fi
+
+          sed -i "s|image:.*|image: quay.io/${IMAGE_NAME}:${IMAGE_TAG}|g" "$MANIFEST_PATH"
+          kubectl apply -f "$MANIFEST_PATH"
+          kubectl rollout status -f "$MANIFEST_PATH" --timeout=180s
+
+      - name: Notify Telegram on deploy result
+        if: success() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
+            -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
+            -d text="✅ Deployment succeeded: ${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Notify Telegram on deploy failure
+        if: failure() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
+            -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
+            -d text="❌ Deployment failed: ${IMAGE_NAME}:${IMAGE_TAG}"
