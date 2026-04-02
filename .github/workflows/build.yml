@@ -6,7 +6,6 @@
 #   -d '{
 #     "event_type": "trigger_build",
 #     "client_payload": {
-#       "name": "angi.user",
 #       "gitUrl": "https://gitea.example.com/org/angi.user.git",
 #       "branch": "main",
 #       "imageName": "angi/angi.user",
@@ -34,7 +33,6 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      NAME: ${{ steps.set_env_vars.outputs.NAME }}
       GIT_URL: ${{ steps.set_env_vars.outputs.GIT_URL }}
       BRANCH: ${{ steps.set_env_vars.outputs.BRANCH }}
       IMAGE_NAME: ${{ steps.set_env_vars.outputs.IMAGE_NAME }}
@@ -50,7 +48,6 @@ jobs:
       - name: Set up environment variables from payload
         id: set_env_vars
         run: |
-          echo "NAME=${{ github.event.client_payload.name }}" >> $GITHUB_OUTPUT
           echo "GIT_URL=$(echo -n '${{ github.event.client_payload.gitUrl }}' | base64 -w0)" >> $GITHUB_OUTPUT
           echo "BRANCH=${{ github.event.client_payload.branch }}" >> $GITHUB_OUTPUT
           echo "IMAGE_NAME=${{ github.event.client_payload.imageName }}" >> $GITHUB_OUTPUT
@@ -75,7 +72,6 @@ jobs:
       QUAY_TOKEN: ${{ needs.prepare.outputs.QUAY_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ needs.prepare.outputs.TELEGRAM_CHAT_ID }}
       TELE_TOKEN: ${{ needs.prepare.outputs.TELE_TOKEN }}
-      NAME: ${{ needs.prepare.outputs.NAME }}
     outputs:
       IMG_TAG: ${{ steps.set_img_tag.outputs.IMG_TAG }}
     steps:
@@ -113,14 +109,14 @@ jobs:
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
             -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
-            -d text="✅ Build complete: ${{ env.NAME }} image=quay.io/${{ env.IMAGE_NAME }}:${{ steps.set_img_tag.outputs.IMG_TAG }}"
+            -d text="✅ Build complete: ${{ env.IMAGE_NAME }} image=quay.io/${{ env.IMAGE_NAME }}:${{ steps.set_img_tag.outputs.IMG_TAG }}"
 
       - name: Notify Telegram on failure
         if: failure() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ env.TELE_TOKEN }}/sendMessage \
             -d chat_id=${{ env.TELEGRAM_CHAT_ID }} \
-            -d text="❌ Build failed: ${{ env.NAME }} for ${{ env.GIT_URL }} branch ${{ env.BRANCH }}"
+            -d text="❌ Build failed: ${{ env.IMAGE_NAME }} for ${{ env.GIT_URL }} branch ${{ env.BRANCH }}"
 
   deploy:
     runs-on: ubuntu-latest
