@@ -141,12 +141,20 @@ jobs:
       - name: Set up kubeconfig from payload
         if: env.KUBECONFIG_CONTENT != ''
         run: |
+          set -e
           mkdir -p $HOME/.kube
-          if echo "${{ env.KUBECONFIG_CONTENT }}" | base64 --decode >/dev/null 2>&1; then
-            echo "${{ env.KUBECONFIG_CONTENT }}" | base64 --decode > $HOME/.kube/config
+
+          RAW_KUBECONFIG="$KUBECONFIG_CONTENT"
+          CLEAN_B64=$(printf '%s' "$RAW_KUBECONFIG" | tr -d ' \r\n\t')
+
+          if printf '%s' "$CLEAN_B64" | base64 --decode > $HOME/.kube/config 2>/dev/null; then
+            echo "kubeconfig decoded from base64 payload"
           else
-            echo "${{ env.KUBECONFIG_CONTENT }}" > $HOME/.kube/config
+            printf '%s' "$RAW_KUBECONFIG" > $HOME/.kube/config
+            echo "kubeconfig written as raw yaml payload"
           fi
+
+          sed -i 's/\r$//' $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
       - name: Deploy to Kubernetes via manifest
@@ -164,8 +172,8 @@ jobs:
           fi
 
           sed -i "s|image:.*|image: quay.io/${IMAGE_NAME}:${IMAGE_TAG}|g" "$MANIFEST_PATH"
-          kubectl apply -f "$MANIFEST_PATH"
-          kubectl rollout status -f "$MANIFEST_PATH" --timeout=180s
+          kubectl --insecure-skip-tls-verify=true apply -f "$MANIFEST_PATH"
+          kubectl --insecure-skip-tls-verify=true rollout status -f "$MANIFEST_PATH" --timeout=180s
 
       - name: Notify Telegram on deploy result
         if: success() && env.TELE_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
